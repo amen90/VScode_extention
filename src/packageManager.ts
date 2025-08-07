@@ -107,30 +107,31 @@ export class PackageManager {
         try {
             console.log(`Getting projects for board: ${boardId} in package: ${packagePath}`);
             
-            // STM32Cube structure: Projects/[BoardName]/[Examples|Applications|Demonstrations]/[ProjectName]/
+            // STM32Cube structure: Projects/[BoardName]/[Examples|Applications|Demonstrations|Templates|Examples_*|Templates_*]/...
             const boardPath = path.join(packagePath, 'Projects', boardId);
             console.log(`Checking board path: ${boardPath}`);
             
             if (await fs.pathExists(boardPath)) {
                 console.log(`✅ Board directory found: ${boardPath}`);
                 
-                // Look for project categories under the board directory
-                const projectCategories = ['Examples', 'Applications', 'Demonstrations', 'Templates'];
+                const projectCategories = await this.findProjectCategories(boardPath);
+                console.log(`Detected categories under board: ${projectCategories.join(', ')}`);
                 
                 for (const category of projectCategories) {
                     const categoryPath = path.join(boardPath, category);
-                    if (await fs.pathExists(categoryPath)) {
-                        console.log(`Found category: ${category} at ${categoryPath}`);
-                        const categoryProjects = await this.scanForProjects(categoryPath);
-                        console.log(`Found ${categoryProjects.length} projects in ${category}`);
-                        
-                        // Add category prefix to project names for clarity
-                        categoryProjects.forEach(project => {
-                            project.name = `${category}/${project.name}`;
-                            project.description = `${category}: ${project.description}`;
+                    const discovered = await this.discoverProjects(categoryPath, 3);
+                    console.log(`Discovered ${discovered.length} projects in ${category}`);
+
+                    for (const projDir of discovered) {
+                        const toolchains = await this.detectToolchains(projDir);
+                        const rel = path.relative(boardPath, projDir).replace(/\\/g, '/');
+                        const displayName = `${category}/${this.formatProjectName(path.basename(projDir))}`;
+                        projects.push({
+                            name: displayName,
+                            description: `STM32 Project: ${rel}`,
+                            path: projDir,
+                            toolchain: toolchains.length ? toolchains : ['Generic']
                         });
-                        
-                        projects.push(...categoryProjects);
                     }
                 }
             } else {
@@ -138,7 +139,7 @@ export class PackageManager {
             }
 
             console.log(`Total projects found for ${boardId}: ${projects.length}`);
-            projects.forEach(project => console.log(`Project: ${project.name}`));
+            projects.forEach(project => console.log(`Project: ${project.name} -> ${project.path}`));
 
             return projects;
         } catch (error) {
@@ -259,6 +260,7 @@ export class PackageManager {
         
         try {
             const entries = await fs.readdir(boardPath, { withFileTypes: true });
+            console.log(`Entries in boards path (${boardPath}):`, entries.map(e => e.name));
             
             for (const entry of entries) {
                 if (entry.isDirectory()) {
@@ -314,24 +316,28 @@ export class PackageManager {
     private async hasProjectsInDirectory(boardDir: string): Promise<boolean> {
         try {
             const entries = await fs.readdir(boardDir, { withFileTypes: true });
-            
-            // In STM32Cube structure, board directories contain category folders like Examples, Applications, etc.
-            const categoryDirs = entries.filter(entry => 
-                entry.isDirectory() && 
-                ['Examples', 'Applications', 'Demonstrations', 'Templates'].includes(entry.name)
-            );
+
+            // Accept categories like: Examples, Examples_LL, Examples_HAL, Templates, Templates_LL, Applications, Demonstrations
+            const isCategory = (name: string): boolean => {
+                return /^(Examples(?!\w)|Examples_[A-Za-z0-9_]+|Templates(?!\w)|Templates_[A-Za-z0-9_]+|Applications|Demonstrations)$/i.test(name);
+            };
+
+            const categoryDirs = entries
+                .filter(entry => entry.isDirectory() && isCategory(entry.name))
+                .map(d => d.name);
+
+            console.log(`Category directories under ${boardDir}: ${categoryDirs.join(', ')}`);
             
             if (categoryDirs.length === 0) {
                 console.log(`No project categories found in ${boardDir}`);
                 return false;
             }
             
-            // Check if at least one category contains actual projects
-            for (const categoryDir of categoryDirs.slice(0, 2)) { // Check first 2 categories
-                const categoryPath = path.join(boardDir, categoryDir.name);
-                const hasProjects = await this.hasProjectsInCategory(categoryPath);
-                if (hasProjects) {
-                    console.log(`Found projects in ${categoryDir.name} category`);
+            for (const category of categoryDirs) {
+                const categoryPath = path.join(boardDir, category);
+                const has = await this.hasProjectsInCategory(categoryPath);
+                if (has) {
+                    console.log(`Found projects in ${category} category`);
                     return true;
                 }
             }
@@ -346,23 +352,8 @@ export class PackageManager {
 
     private async hasProjectsInCategory(categoryPath: string): Promise<boolean> {
         try {
-            const entries = await fs.readdir(categoryPath, { withFileTypes: true });
-            const projectDirs = entries.filter(entry => entry.isDirectory());
-            
-            if (projectDirs.length === 0) {
-                return false;
-            }
-            
-            // Check if at least one directory contains project files
-            for (const projectDir of projectDirs.slice(0, 3)) { // Check first 3 projects
-                const projectPath = path.join(categoryPath, projectDir.name);
-                const hasProjectFiles = await this.hasProjectFiles(projectPath);
-                if (hasProjectFiles) {
-                    return true;
-                }
-            }
-            
-            return false;
+            const found = (await this.discoverProjects(categoryPath, 2)).length > 0;
+            return found;
         } catch (error) {
             return false;
         }
@@ -475,6 +466,7 @@ export class PackageManager {
     }
 
     private async scanForProjects(projectPath: string): Promise<ProjectInfo[]> {
+        // Deprecated in favor of discoverProjects + detectToolchains, but kept for compatibility where used
         const projects: ProjectInfo[] = [];
         
         try {
@@ -553,6 +545,14 @@ export class PackageManager {
     }
 
     private async findProjectSource(packagePath: string, boardId: string, projectName: string): Promise<string | null> {
+        // If the incoming projectName already contains the category path (e.g., "Examples/GPIO/...")
+        // try to resolve it directly under the board folder; otherwise fall back to best-effort guesses.
+        const baseBoardPath = path.join(packagePath, 'Projects', boardId);
+        const directCandidate = path.join(baseBoardPath, projectName);
+        if (await fs.pathExists(directCandidate)) {
+            return directCandidate;
+        }
+
         const possiblePaths = [
             path.join(packagePath, 'Projects', boardId, projectName),
             path.join(packagePath, 'Examples', boardId, projectName),
@@ -576,5 +576,94 @@ export class PackageManager {
         } catch (error) {
             console.error('Error updating project configuration:', error);
         }
+    }
+
+    // NEW HELPERS
+    private async findProjectCategories(boardPath: string): Promise<string[]> {
+        const entries = await fs.readdir(boardPath, { withFileTypes: true });
+        const isCategory = (name: string): boolean => {
+            return /^(Examples(?!\w)|Examples_[A-Za-z0-9_]+|Templates(?!\w)|Templates_[A-Za-z0-9_]+|Applications|Demonstrations)$/i.test(name);
+        };
+        return entries.filter(e => e.isDirectory() && isCategory(e.name)).map(e => e.name);
+    }
+
+    private async discoverProjects(root: string, maxDepth: number): Promise<string[]> {
+        const discovered: string[] = [];
+
+        const walk = async (dir: string, depth: number): Promise<void> => {
+            if (depth > maxDepth) {
+                return;
+            }
+
+            // If this directory looks like a project root, record it and do not dive deeper
+            if (await this.looksLikeProjectRoot(dir)) {
+                discovered.push(dir);
+                return;
+            }
+
+            const entries = await fs.readdir(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (!entry.isDirectory()) {
+                    continue;
+                }
+                const child = path.join(dir, entry.name);
+                await walk(child, depth + 1);
+            }
+        };
+
+        try {
+            await walk(root, 0);
+        } catch (error) {
+            console.error(`Error discovering projects under ${root}:`, error);
+        }
+
+        return discovered;
+    }
+
+    private async looksLikeProjectRoot(dir: string): Promise<boolean> {
+        try {
+            const entries = await fs.readdir(dir, { withFileTypes: true });
+            const names = entries.map(e => e.name.toLowerCase());
+
+            // Common STM32Cube project indicators
+            const toolchainDirs = ['mdk-arm', 'ewarm', 'iar', 'stm32cubeide', 'sw4stm32'];
+            const fileIndicators = ['uvprojx', 'eww', 'ewp', 'cproject', 'project', 'ioc', 'makefile'];
+
+            // If any toolchain directory exists here → project root
+            if (entries.some(e => e.isDirectory() && toolchainDirs.includes(e.name.toLowerCase()))) {
+                return true;
+            }
+
+            // If any file indicator exists here → project root
+            if (entries.some(e => !e.isDirectory() && fileIndicators.some(ext => e.name.toLowerCase().endsWith(ext)))) {
+                return true;
+            }
+
+            // If typical source layout exists directly under this folder
+            const hasCore = entries.some(e => e.isDirectory() && e.name.toLowerCase() === 'core');
+            const hasInc = entries.some(e => e.isDirectory() && e.name.toLowerCase() === 'inc');
+            const hasSrc = entries.some(e => e.isDirectory() && e.name.toLowerCase() === 'src');
+            if ((hasInc && hasSrc) || hasCore) {
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    private async detectToolchains(projectDir: string): Promise<string[]> {
+        const toolchains: string[] = [];
+        const entries = await fs.readdir(projectDir, { withFileTypes: true });
+        const names = entries.map(e => e.name.toLowerCase());
+
+        const addIf = (cond: boolean, name: string) => { if (cond) toolchains.push(name); };
+        addIf(names.includes('stm32cubeide') || await this.hasMatchingFile(projectDir, '*.cproject'), 'STM32CubeIDE');
+        addIf(names.includes('mdk-arm') || await this.hasMatchingFile(projectDir, '*.uvprojx'), 'Keil');
+        addIf(names.includes('ewarm') || await this.hasMatchingFile(projectDir, '*.eww') || await this.hasMatchingFile(projectDir, '*.ewp'), 'IAR');
+        addIf(await this.hasMatchingFile(projectDir, 'Makefile'), 'GCC');
+
+        return Array.from(new Set(toolchains));
     }
 } 
