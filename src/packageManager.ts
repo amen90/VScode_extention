@@ -148,34 +148,76 @@ export class PackageManager {
         }
     }
 
-    async importProject(packagePath: string, boardId: string, projectName: string): Promise<string> {
+    // Overloads to support both legacy (3 args) and extended (with location/target/projectPath)
+    async importProject(packagePath: string, boardId: string, projectName: string): Promise<string>;
+    async importProject(packagePath: string, boardId: string, projectName: string, location?: string, targetName?: string, projectPath?: string): Promise<string>;
+    async importProject(packagePath: string, boardId: string, projectName: string, location?: string, targetName?: string, projectPath?: string): Promise<string> {
         try {
-            // Get target location from user
-            const options: vscode.OpenDialogOptions = {
-                canSelectMany: false,
-                canSelectFiles: false,
-                canSelectFolders: true,
-                openLabel: 'Select Import Location'
-            };
+            let targetBasePath: string;
+            let finalProjectName: string;
 
-            const folderUri = await vscode.window.showOpenDialog(options);
-            if (!folderUri || !folderUri[0]) {
-                throw new Error('No import location selected');
+            if (location && location.trim().length > 0) {
+                targetBasePath = location.trim();
+            } else {
+                // Ask user to choose destination folder as a fallback
+                const options: vscode.OpenDialogOptions = {
+                    canSelectMany: false,
+                    canSelectFiles: false,
+                    canSelectFolders: true,
+                    openLabel: 'Select Import Location'
+                };
+                const folderUri = await vscode.window.showOpenDialog(options);
+                if (!folderUri || !folderUri[0]) {
+                    throw new Error('No import location selected');
+                }
+                targetBasePath = folderUri[0].fsPath;
             }
 
-            const targetPath = path.join(folderUri[0].fsPath, projectName);
-            
-            // Find the project source
-            const projectSource = await this.findProjectSource(packagePath, boardId, projectName);
-            if (!projectSource) {
-                throw new Error(`Project ${projectName} not found for board ${boardId}`);
+            // Determine the project folder name
+            if (targetName && targetName.trim().length > 0) {
+                finalProjectName = targetName.trim();
+            } else {
+                // Derive a reasonable name from the projectName display string
+                const leaf = projectName.split('/')
+                    .filter(Boolean)
+                    .pop() || projectName;
+                // Use a filesystem-safe version of the leaf name without prettifying
+                finalProjectName = leaf.replace(/[<>:\"/\\|?*]/g, '_').trim();
             }
 
-            // Copy project files
-            await fs.copy(projectSource, targetPath);
+            const targetPath = path.join(targetBasePath, finalProjectName);
+            // Ensure only the parent directory exists to avoid nesting the project as a subfolder
+            await fs.ensureDir(targetBasePath);
+
+            // Determine project source directory
+            let sourceProjectPath: string | null = null;
+            if (projectPath && projectPath.trim().length > 0) {
+                sourceProjectPath = projectPath;
+            } else {
+                sourceProjectPath = await this.findProjectSource(packagePath, boardId, projectName);
+            }
+            if (!sourceProjectPath) {
+                throw new Error(`Project source not found for "${projectName}"`);
+            }
+
+            // Copy the selected project contents
+            console.log(`Copying project from ${sourceProjectPath} -> ${targetPath}`);
+            await fs.copy(sourceProjectPath, targetPath, { overwrite: true, errorOnExist: false });
+
+            // Always include Drivers from the package root
+            const driversSrc = path.join(packagePath, 'Drivers');
+            const driversDst = path.join(targetPath, 'Drivers');
+            if (await fs.pathExists(driversSrc)) {
+                console.log(`Copying Drivers from ${driversSrc} -> ${driversDst}`);
+                await fs.copy(driversSrc, driversDst, { overwrite: true, errorOnExist: false });
+            } else {
+                console.warn(`Drivers folder not found in package: ${driversSrc}`);
+            }
             
+            // Optional: could also include Middlewares similarly if needed
+
             // Update project configuration if needed
-            await this.updateProjectConfiguration(targetPath, projectName);
+            await this.updateProjectConfiguration(targetPath, finalProjectName);
 
             return targetPath;
         } catch (error) {

@@ -69,8 +69,14 @@
         const projectName = e.target.value;
         selectedProject = currentProjects.find(p => p.name === projectName);
         
-        if (selectedProject && !projectNameInput.value) {
-            projectNameInput.value = selectedProject.name;
+        if (selectedProject) {
+            // Suggest a clean folder name (basename of the project path or display name)
+            const suggested = (selectedProject.path && typeof selectedProject.path === 'string')
+                ? selectedProject.path.split(/[/\\]/).pop()
+                : (selectedProject.name || '').split('/').pop();
+            if (!projectNameInput.value || projectNameInput.value === '' || projectNameInput.value === selectedProject.name) {
+                projectNameInput.value = suggested || projectNameInput.value;
+            }
         }
         
         updateImportButton();
@@ -80,12 +86,7 @@
     locationInput.addEventListener('input', updateImportButton);
 
     browseLocationBtn.addEventListener('click', () => {
-        // This would typically open a file dialog, but in webview we'll use a simple prompt
-        const location = prompt('Enter the project location:', locationInput.value || '');
-        if (location) {
-            locationInput.value = location;
-            updateImportButton();
-        }
+        vscode.postMessage({ command: 'browseLocation' });
     });
 
     importBtn.addEventListener('click', () => {
@@ -97,6 +98,7 @@
                 packagePath: currentPackageInfo.path,
                 boardId: selectedBoard.id,
                 projectName: selectedProject.name,
+                projectPath: selectedProject.path,
                 targetName: projectName,
                 location: locationInput.value,
                 openReadme: openReadmeCheckbox.checked
@@ -125,6 +127,9 @@
                 break;
             case 'importComplete':
                 handleImportComplete(message.success, message.message);
+                break;
+            case 'locationSelected':
+                handleLocationSelected(message.path);
                 break;
         }
     });
@@ -207,6 +212,13 @@
         }
     }
 
+    function handleLocationSelected(path) {
+        if (path) {
+            locationInput.value = path;
+            updateImportButton();
+        }
+    }
+
     function showBoardPreview(board) {
         boardPreview.style.display = 'block';
         boardDescription.textContent = board.description;
@@ -251,10 +263,12 @@
     }
 
     function canImport() {
+        const hasValidLocation = !!locationInput.value && locationInput.value.trim() !== '' && locationInput.value !== 'Select location';
         return currentPackageInfo && 
                selectedBoard && 
                selectedProject && 
-               projectNameInput.value.trim() !== '';
+               projectNameInput.value.trim() !== '' &&
+               hasValidLocation;
     }
 
     function updateImportButton() {
@@ -264,6 +278,6 @@
     // Initialize
     updateImportButton();
     
-    // Set default location
-    locationInput.value = 'Select location';
+    // Set default location placeholder only (no value)
+    locationInput.value = '';
 })(); 

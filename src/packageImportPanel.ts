@@ -62,8 +62,18 @@ export class PackageImportPanel {
             case 'selectProject':
                 await this._selectProject(message.packagePath, message.boardId);
                 break;
+            case 'browseLocation':
+                await this._browseLocation();
+                break;
             case 'importProject':
-                await this._importProject(message.packagePath, message.boardId, message.projectName);
+                await this._importProject(
+                    message.packagePath,
+                    message.boardId,
+                    message.projectName,
+                    message.location,
+                    message.targetName,
+                    message.projectPath
+                );
                 break;
         }
     }
@@ -124,9 +134,23 @@ export class PackageImportPanel {
         });
     }
 
-    private async _importProject(packagePath: string, boardId: string, projectName: string) {
+    private async _importProject(
+        packagePath: string,
+        boardId: string,
+        projectName: string,
+        location?: string,
+        targetName?: string,
+        projectPath?: string
+    ) {
         try {
-            const workspacePath = await this._packageManager.importProject(packagePath, boardId, projectName);
+            const workspacePath = await this._packageManager.importProject(
+                packagePath,
+                boardId,
+                projectName,
+                location,
+                targetName,
+                projectPath
+            );
             vscode.window.showInformationMessage(`Project imported successfully to: ${workspacePath}`);
             
             // Ask if user wants to open the project
@@ -140,9 +164,33 @@ export class PackageImportPanel {
                 const uri = vscode.Uri.file(workspacePath);
                 await vscode.commands.executeCommand('vscode.openFolder', uri);
             }
+
+            // Notify webview the import is complete
+            this._panel.webview.postMessage({
+                command: 'importComplete',
+                success: true,
+                message: 'Import finished'
+            });
         } catch (error) {
             vscode.window.showErrorMessage(`Failed to import project: ${error}`);
+            this._panel.webview.postMessage({
+                command: 'importComplete',
+                success: false,
+                message: String(error)
+            });
         }
+    }
+
+    private async _browseLocation() {
+        const options: vscode.OpenDialogOptions = {
+            canSelectMany: false,
+            canSelectFiles: false,
+            canSelectFolders: true,
+            openLabel: 'Select Import Location'
+        };
+        const folderUri = await vscode.window.showOpenDialog(options);
+        const path = folderUri && folderUri[0] ? folderUri[0].fsPath : '';
+        this._panel.webview.postMessage({ command: 'locationSelected', path });
     }
 
     private _update() {
