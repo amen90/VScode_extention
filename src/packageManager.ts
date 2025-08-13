@@ -214,8 +214,16 @@ export class PackageManager {
                 console.warn(`Drivers folder not found in package: ${driversSrc}`);
             }
             
-            // Optional: could also include Middlewares similarly if needed
-
+            // Always include Middlewares from the package root (if present)
+            const middlewaresSrc = path.join(packagePath, 'Middlewares');
+            const middlewaresDst = path.join(targetPath, 'Middlewares');
+            if (await fs.pathExists(middlewaresSrc)) {
+                console.log(`Copying Middlewares from ${middlewaresSrc} -> ${middlewaresDst}`);
+                await fs.copy(middlewaresSrc, middlewaresDst, { overwrite: true, errorOnExist: false });
+            } else {
+                console.warn(`Middlewares folder not found in package: ${middlewaresSrc}`);
+            }
+            
             // Update project configuration if needed
             await this.updateProjectConfiguration(targetPath, finalProjectName);
 
